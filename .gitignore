@@ -9,3 +9,18 @@ Thumbs.db
 .vscode/
 .idea/
 *.bak
+# Rust / Soroban build output
+target/
+contract/target/
+contracts/target/
+contracts/**/target/
+# Soroban test snapshots
+test_snapshots/
+contracts/**/test_snapshots/
+# Frontend build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+# Local env files
+.stellar/
+# OS files
