@@ -1,0 +1,16 @@
+[package]
+name = "car_lease"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "car_lease"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
