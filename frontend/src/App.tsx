@@ -1,551 +1,362 @@
-﻿import { useMemo, useState } from "react";
-import * as StellarSdk from "@stellar/stellar-sdk";
+import { useMemo, useState } from 'react';
+import './App.css';
+import { connectWallet } from './services/wallet';
 import {
-  getAddress,
-  isConnected,
-  requestAccess,
-  setAllowed,
-  signTransaction,
-} from "@stellar/freighter-api";
-
-type TxStatus = "idle" | "pending" | "success" | "failed";
-
-type FreighterConnectionResponse =
-  | boolean
-  | {
-      isConnected?: boolean;
-      error?: string;
-    };
-
-type FreighterAddressResponse =
-  | string
-  | {
-      address?: string;
-      error?: string;
-    };
-
-type FreighterSignResponse =
-  | string
-  | {
-      signedTxXdr?: string;
-      signerAddress?: string;
-      error?: string;
-    };
-
-type VehiclePlan = {
-  name: string;
-  vehicle: string;
-  term: string;
-  monthlyRent: number;
-  mileageCap: number;
-  deposit: number;
-  description: string;
-};
-
-const HORIZON_URL = "https://horizon-testnet.stellar.org";
-const EXPLORER_TX_URL = "https://stellar.expert/explorer/testnet/tx/";
-
-const server = new StellarSdk.Horizon.Server(HORIZON_URL);
-
-const vehiclePlans: VehiclePlan[] = [
-  {
-    name: "City Compact",
-    vehicle: "Toyota Yaris / Honda Jazz",
-    term: "3-day city lease",
-    monthlyRent: 120,
-    mileageCap: 250,
-    deposit: 1,
-    description:
-      "Best for short-stay travellers who need a simple city car for errands, airport pickup, or hotel-to-city trips.",
-  },
-  {
-    name: "Road Trip SUV",
-    vehicle: "Mazda CX-5 / Hyundai Tucson",
-    term: "7-day road-trip lease",
-    monthlyRent: 320,
-    mileageCap: 700,
-    deposit: 2,
-    description:
-      "Designed for road trips, tourism routes, and longer travel plans with a higher mileage cap.",
-  },
-  {
-    name: "Premium EV",
-    vehicle: "Tesla Model 3 / BYD Seal",
-    term: "5-day electric lease",
-    monthlyRent: 450,
-    mileageCap: 500,
-    deposit: 3,
-    description:
-      "A premium electric vehicle lease profile for travellers who prefer clean mobility and modern cars.",
-  },
-];
-
-function shortAddress(address: string) {
-  if (!address) return "";
-  return `${address.slice(0, 6)}...${address.slice(-6)}`;
-}
-
-function readConnectionStatus(result: FreighterConnectionResponse) {
-  if (typeof result === "boolean") return result;
-  return Boolean(result.isConnected);
-}
-
-function readAddress(result: FreighterAddressResponse) {
-  if (typeof result === "string") return result;
-  return result.address ?? "";
-}
-
-function readSignedXdr(result: FreighterSignResponse) {
-  if (typeof result === "string") return result;
-  return result.signedTxXdr ?? "";
-}
+  addCar,
+  getCar,
+  getContractMethods,
+  getLease,
+  getRuntimeConfig,
+  getStats,
+  leaseCar,
+  markAvailable,
+  shortenAddress,
+  type SubmittedTransaction,
+} from './services/contract';
 
 function App() {
-  const [publicKey, setPublicKey] = useState("");
-  const [balance, setBalance] = useState("0.00");
-  const [selectedPlan, setSelectedPlan] = useState(vehiclePlans[0].name);
-  const [lessorAddress, setLessorAddress] = useState("");
-  const [amount, setAmount] = useState(vehiclePlans[0].deposit.toString());
-  const [memo, setMemo] = useState("car_lease");
-  const [txStatus, setTxStatus] = useState<TxStatus>("idle");
-  const [txHash, setTxHash] = useState("");
-  const [message, setMessage] = useState(
-    "Connect your Freighter wallet to start a testnet lease payment."
-  );
-  const [activity, setActivity] = useState<string[]>([
-    "car_lease loaded on Stellar Testnet.",
-  ]);
+  const runtime = useMemo(() => getRuntimeConfig(), []);
+  const methods = useMemo(() => getContractMethods(), []);
 
-  const activePlan = useMemo(() => {
-    return (
-      vehiclePlans.find((plan) => plan.name === selectedPlan) ?? vehiclePlans[0]
-    );
-  }, [selectedPlan]);
+  const [walletAddress, setWalletAddress] = useState('');
+  const [vin, setVin] = useState('VIN-STELLAR-001');
+  const [model, setModel] = useState('Tesla Model 3');
+  const [dailyRate, setDailyRate] = useState('100');
 
-  const txLink = txHash ? `${EXPLORER_TX_URL}${txHash}` : "";
+  const [carId, setCarId] = useState(1);
+  const [leaseId, setLeaseId] = useState(1);
+  const [startLedger, setStartLedger] = useState(10);
+  const [endLedger, setEndLedger] = useState(13);
+  const [payment, setPayment] = useState('300');
 
-  function addActivity(item: string) {
-    setActivity((current) => [item, ...current].slice(0, 7));
-  }
+  const [statusMessage, setStatusMessage] = useState('Ready to connect Freighter on Stellar testnet.');
+  const [lastTransaction, setLastTransaction] = useState<SubmittedTransaction | null>(null);
+  const [queryResult, setQueryResult] = useState('Read results will appear here.');
 
-  function selectPlan(plan: VehiclePlan) {
-    setSelectedPlan(plan.name);
-    setAmount(plan.deposit.toString());
-    setMemo(`lease_${plan.name}`.replace(/\s+/g, "_").slice(0, 28));
-    addActivity(`Selected lease plan: ${plan.name}.`);
-  }
-
-  async function getWalletAddressWithFallback() {
-    console.log("Connect button clicked.");
-
-    try {
-      const requestResult = (await requestAccess()) as FreighterAddressResponse;
-      const requestedAddress = readAddress(requestResult);
-
-      if (requestedAddress) {
-        console.log("Address from requestAccess:", requestedAddress);
-        return requestedAddress;
-      }
-    } catch (error) {
-      console.warn("requestAccess failed, trying setAllowed + getAddress.", error);
-    }
-
-    await setAllowed();
-
-    const addressResult = (await getAddress()) as FreighterAddressResponse;
-    const walletAddress = readAddress(addressResult);
-
+  const requireWallet = async () => {
     if (walletAddress) {
-      console.log("Address from getAddress:", walletAddress);
       return walletAddress;
     }
 
-    return "";
-  }
+    const connected = await connectWallet();
+    setWalletAddress(connected);
+    return connected;
+  };
 
-  async function connectWallet() {
+  const handleConnectWallet = async () => {
     try {
-      setTxHash("");
-      setTxStatus("idle");
-      setMessage("Opening Freighter connection request...");
-      addActivity("Connect button clicked. Waiting for Freighter.");
-
-      try {
-        const connectedResult = (await isConnected()) as FreighterConnectionResponse;
-        const hasFreighter = readConnectionStatus(connectedResult);
-
-        if (!hasFreighter) {
-          addActivity("Freighter extension may not be detected yet.");
-        }
-      } catch {
-        addActivity("Freighter connection check skipped.");
-      }
-
-      const walletAddress = await getWalletAddressWithFallback();
-
-      if (!walletAddress) {
-        setTxStatus("failed");
-        setMessage(
-          "Could not read wallet address. Unlock Freighter, switch to Testnet, then click Connect again."
-        );
-        addActivity("Wallet connection failed: address unavailable.");
-        return;
-      }
-
-      setPublicKey(walletAddress);
-      setMessage("Wallet connected successfully.");
-      addActivity(`Connected lessee wallet ${shortAddress(walletAddress)}.`);
-      await fetchBalance(walletAddress);
+      setStatusMessage('Connecting Freighter wallet...');
+      const connected = await connectWallet();
+      setWalletAddress(connected);
+      setStatusMessage('Wallet connected successfully.');
     } catch (error) {
-      console.error("Wallet connection failed:", error);
-      setTxStatus("failed");
-      setMessage(
-        "Wallet connection failed or was rejected. Unlock Freighter, allow localhost, switch to Testnet, then try again."
-      );
-      addActivity("Wallet connection failed or was rejected.");
+      setStatusMessage(error instanceof Error ? error.message : 'Wallet connection failed.');
     }
-  }
+  };
 
-  function disconnectWallet() {
-    setPublicKey("");
-    setBalance("0.00");
-    setTxStatus("idle");
-    setTxHash("");
-    setMessage("Wallet disconnected from the app UI.");
-    addActivity("Wallet disconnected from the app UI.");
-  }
-
-  async function fetchBalance(address = publicKey) {
+  const handleAddCar = async () => {
     try {
-      if (!address) {
-        setMessage("Connect wallet first before refreshing balance.");
-        return;
-      }
+      const owner = await requireWallet();
+      setStatusMessage('Preparing add_car transaction. Please sign in Freighter.');
 
-      const account = await server.loadAccount(address);
-      const nativeBalance = account.balances.find(
-        (item) => item.asset_type === "native"
-      );
+      const tx = await addCar({
+        owner,
+        vin,
+        model,
+        dailyRate,
+      });
 
-      const readableBalance = nativeBalance
-        ? Number(nativeBalance.balance).toFixed(2)
-        : "0.00";
-
-      setBalance(readableBalance);
-      setMessage("Balance refreshed from Stellar Testnet.");
-      addActivity(`Balance refreshed: ${readableBalance} XLM.`);
+      setLastTransaction(tx);
+      setStatusMessage('add_car transaction submitted to Stellar testnet.');
     } catch (error) {
-      console.error(error);
-      setTxStatus("failed");
-      setMessage(
-        "Could not fetch balance. Make sure your Freighter account is funded on Stellar Testnet."
-      );
-      addActivity("Balance fetch failed.");
+      setStatusMessage(error instanceof Error ? error.message : 'add_car transaction failed.');
     }
-  }
+  };
 
-  async function sendLeasePayment() {
+  const handleLeaseCar = async () => {
     try {
-      setTxHash("");
-      setTxStatus("pending");
-      setMessage("Preparing lease initiation transaction...");
+      const lessee = await requireWallet();
+      setStatusMessage('Preparing lease_car transaction. Please sign in Freighter.');
 
-      if (!publicKey) {
-        setTxStatus("failed");
-        setMessage("Please connect your Freighter wallet first.");
-        addActivity("Lease payment failed: wallet not connected.");
-        return;
-      }
+      const tx = await leaseCar({
+        lessee,
+        carId,
+        startLedger,
+        endLedger,
+        payment,
+      });
 
-      if (!lessorAddress || !lessorAddress.startsWith("G")) {
-        setTxStatus("failed");
-        setMessage("Please enter a valid Stellar Testnet lessor address starting with G.");
-        addActivity("Lease payment failed: invalid lessor address.");
-        return;
-      }
-
-      const numericAmount = Number(amount);
-
-      if (!numericAmount || numericAmount <= 0) {
-        setTxStatus("failed");
-        setMessage("Please enter a valid XLM amount greater than 0.");
-        addActivity("Lease payment failed: invalid amount.");
-        return;
-      }
-
-      if (numericAmount > Number(balance)) {
-        setTxStatus("failed");
-        setMessage("Insufficient XLM balance for this testnet lease payment.");
-        addActivity("Lease payment failed: insufficient balance.");
-        return;
-      }
-
-      setMessage("Loading lessee account from Stellar Testnet...");
-      const sourceAccount = await server.loadAccount(publicKey);
-
-      const safeMemo = memo.trim()
-        ? memo.trim().replace(/\s+/g, "_").slice(0, 28)
-        : "car_lease";
-
-      const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
-        fee: StellarSdk.BASE_FEE,
-        networkPassphrase: StellarSdk.Networks.TESTNET,
-      })
-        .addOperation(
-          StellarSdk.Operation.payment({
-            destination: lessorAddress,
-            asset: StellarSdk.Asset.native(),
-            amount: numericAmount.toString(),
-          })
-        )
-        .addMemo(StellarSdk.Memo.text(safeMemo))
-        .setTimeout(180)
-        .build();
-
-      setMessage("Please approve the lease payment in Freighter...");
-
-      const signedResult = (await signTransaction(transaction.toXDR(), {
-        networkPassphrase: StellarSdk.Networks.TESTNET,
-      })) as FreighterSignResponse;
-
-      const signedXdr = readSignedXdr(signedResult);
-
-      if (!signedXdr) {
-        setTxStatus("failed");
-        setMessage("Freighter did not return a signed transaction.");
-        addActivity("Lease payment failed: missing signed transaction XDR.");
-        return;
-      }
-
-      const signedTransaction = StellarSdk.TransactionBuilder.fromXDR(
-        signedXdr,
-        StellarSdk.Networks.TESTNET
-      );
-
-      setMessage("Submitting lease payment to Stellar Testnet...");
-      addActivity("Lease payment signed by Freighter.");
-
-      const submittedTx = await server.submitTransaction(signedTransaction);
-
-      setTxHash(submittedTx.hash);
-      setTxStatus("success");
-      setMessage(
-        "Lease initiation payment sent successfully. Transaction hash is visible below."
-      );
-      addActivity(`Success: ${numericAmount} XLM sent for ${activePlan.name}.`);
-
-      await fetchBalance(publicKey);
+      setLastTransaction(tx);
+      setStatusMessage('lease_car transaction submitted to Stellar testnet.');
     } catch (error) {
-      console.error(error);
-      setTxStatus("failed");
-      setMessage(
-        "Transaction failed or was rejected. Check Freighter Testnet mode, balance, lessor address, and amount."
-      );
-      addActivity("Lease payment failed or was rejected.");
+      setStatusMessage(error instanceof Error ? error.message : 'lease_car transaction failed.');
     }
-  }
+  };
+
+  const handleMarkAvailable = async () => {
+    try {
+      const owner = await requireWallet();
+      setStatusMessage('Preparing mark_available transaction. Please sign in Freighter.');
+
+      const tx = await markAvailable({
+        owner,
+        carId,
+      });
+
+      setLastTransaction(tx);
+      setStatusMessage('mark_available transaction submitted to Stellar testnet.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'mark_available transaction failed.');
+    }
+  };
+
+  const handleGetCar = async () => {
+    try {
+      const source = await requireWallet();
+      setStatusMessage('Reading get_car through Soroban RPC simulation...');
+
+      const result = await getCar(source, carId);
+      setQueryResult(JSON.stringify(result, null, 2));
+      setStatusMessage('get_car query completed.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'get_car query failed.');
+    }
+  };
+
+  const handleGetLease = async () => {
+    try {
+      const source = await requireWallet();
+      setStatusMessage('Reading get_lease through Soroban RPC simulation...');
+
+      const result = await getLease(source, leaseId);
+      setQueryResult(JSON.stringify(result, null, 2));
+      setStatusMessage('get_lease query completed.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'get_lease query failed.');
+    }
+  };
+
+  const handleGetStats = async () => {
+    try {
+      const source = await requireWallet();
+      setStatusMessage('Reading stats through Soroban RPC simulation...');
+
+      const result = await getStats(source);
+      setQueryResult(JSON.stringify(result, null, 2));
+      setStatusMessage('stats query completed.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'stats query failed.');
+    }
+  };
 
   return (
-    <main className="app">
-      <nav className="topbar">
-        <div>
-          <p className="eyebrow">Stellar Level 1 dApp</p>
-          <h1>car_lease</h1>
-        </div>
-
-        <div className="wallet-actions">
-          {publicKey ? (
-            <>
-              <button className="ghost-button" onClick={() => fetchBalance()}>
-                Refresh Balance
-              </button>
-              <button className="danger-button" onClick={disconnectWallet}>
-                Disconnect
-              </button>
-            </>
-          ) : (
-            <button className="primary-button" onClick={connectWallet}>
-              Connect Freighter
-            </button>
-          )}
-        </div>
-      </nav>
-
+    <main className="app-shell">
       <section className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">Mobility leasing on Stellar Testnet</p>
-          <h2>Start a vehicle lease with a signed XLM testnet payment.</h2>
-          <p>
-            This Level 1 version proves the required Stellar fundamentals:
-            Freighter connection, XLM balance display, payment signing, and
-            transaction feedback with a Stellar Expert link.
-          </p>
-        </div>
-
-        <div className="hero-card">
-          <span>Network</span>
-          <strong>Stellar Testnet</strong>
-          <small>No real XLM is used</small>
-        </div>
-      </section>
-
-      <section className="stats-grid">
-        <div className="stat-card">
-          <span>Selected Vehicle</span>
-          <strong>{activePlan.name}</strong>
-        </div>
-        <div className="stat-card">
-          <span>Lease Term</span>
-          <strong>{activePlan.term}</strong>
-        </div>
-        <div className="stat-card">
-          <span>Mileage Cap</span>
-          <strong>{activePlan.mileageCap} km</strong>
-        </div>
-        <div className="stat-card">
-          <span>Suggested Deposit</span>
-          <strong>{activePlan.deposit} XLM</strong>
-        </div>
-      </section>
-
-      <section className="grid">
-        <div className="panel wallet-panel">
-          <div className="panel-header">
-            <p className="eyebrow">Lessee Wallet</p>
-            <h3>Connected Account</h3>
-          </div>
-
-          {publicKey ? (
-            <>
-              <div className="address-box">{publicKey}</div>
-              <div className="metric-row">
-                <div>
-                  <span>XLM Balance</span>
-                  <strong>{balance}</strong>
-                </div>
-                <div>
-                  <span>Status</span>
-                  <strong>Connected</strong>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="empty-state">
-              Connect Freighter to show your lessee address and XLM balance.
+        <nav className="topbar">
+          <div className="brand">
+            <div className="brand-mark">CL</div>
+            <div>
+              <p>Stellar Level 3 dApp</p>
+              <h1>car_lease</h1>
             </div>
-          )}
-        </div>
-
-        <div className="panel vehicle-panel">
-          <div className="panel-header">
-            <p className="eyebrow">Vehicle Listing</p>
-            <h3>Choose Lease Plan</h3>
           </div>
 
-          <div className="vehicle-list">
-            {vehiclePlans.map((plan) => (
-              <button
-                key={plan.name}
-                className={
-                  plan.name === selectedPlan
-                    ? "vehicle-button active"
-                    : "vehicle-button"
-                }
-                onClick={() => selectPlan(plan)}
-              >
-                <strong>{plan.name}</strong>
-                <span>{plan.vehicle}</span>
-                <small>
-                  {plan.term} · {plan.mileageCap} km cap · {plan.deposit} XLM deposit
-                </small>
-              </button>
-            ))}
-          </div>
-
-          <div className="vehicle-detail">
-            <span>{activePlan.description}</span>
-          </div>
-        </div>
-
-        <div className="panel payment-panel">
-          <div className="panel-header">
-            <p className="eyebrow">Lease Payment</p>
-            <h3>Send Testnet XLM</h3>
-          </div>
-
-          <label>
-            Lessor Address
-            <input
-              value={lessorAddress}
-              onChange={(event) => setLessorAddress(event.target.value)}
-              placeholder="Paste funded Testnet lessor G... address"
-            />
-          </label>
-
-          <label>
-            Lease Initiation Amount in XLM
-            <input
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-              placeholder="1"
-              type="number"
-              min="0"
-              step="0.1"
-            />
-          </label>
-
-          <label>
-            Memo
-            <input
-              value={memo}
-              onChange={(event) => setMemo(event.target.value)}
-              maxLength={28}
-              placeholder="car_lease"
-            />
-          </label>
-
-          <button
-            className="primary-button full-width"
-            onClick={sendLeasePayment}
-            disabled={txStatus === "pending"}
-          >
-            {txStatus === "pending" ? "Sending..." : "Start Lease Payment"}
+          <button className="wallet-button" onClick={handleConnectWallet}>
+            {walletAddress ? shortenAddress(walletAddress) : 'Connect Freighter'}
           </button>
+        </nav>
 
-          <p className="hint">
-            The destination lessor account must already exist and be funded on
-            Stellar Testnet.
-          </p>
-        </div>
+        <div className="hero-grid">
+          <div>
+            <p className="eyebrow">Real Soroban contract integration</p>
+            <h2>Lease cars on Stellar testnet with wallet-signed contract calls.</h2>
+            <p className="hero-copy">
+              This Level 3 fix adds real frontend integration with Freighter, Soroban RPC,
+              TransactionBuilder, prepareTransaction, sendTransaction, nativeToScVal, and
+              scValToNative. The UI triggers the same functions defined in the smart contract.
+            </p>
 
-        <div className="panel status-panel">
-          <div className="panel-header">
-            <p className="eyebrow">Transaction Monitor</p>
-            <h3>Status</h3>
-          </div>
-
-          <div className={`status-card ${txStatus}`}>
-            <span>{txStatus.toUpperCase()}</span>
-            <p>{message}</p>
-          </div>
-
-          {txHash && (
-            <div className="tx-box">
-              <span>Transaction Hash</span>
-              <code>{txHash}</code>
-              <a href={txLink} target="_blank" rel="noreferrer">
-                View on Stellar Expert
+            <div className="hero-actions">
+              <a href={runtime.contractExplorerUrl} target="_blank" rel="noreferrer">
+                View contract
               </a>
+              <button onClick={handleGetStats}>Read stats</button>
             </div>
-          )}
+          </div>
 
-          <div className="activity-feed">
-            <h4>Lease Activity Feed</h4>
-            {activity.map((item, index) => (
-              <p key={`${item}-${index}`}>{item}</p>
+          <article className="deployment-card">
+            <p className="card-label">Deployment</p>
+            <h3>{runtime.hasDeployedContract ? 'Live on testnet' : 'Not deployed'}</h3>
+
+            <div>
+              <span>Contract</span>
+              <strong>{shortenAddress(runtime.contractId)}</strong>
+            </div>
+
+            <div>
+              <span>Network</span>
+              <strong>{runtime.network}</strong>
+            </div>
+
+            <div>
+              <span>RPC</span>
+              <strong>{runtime.rpcUrl.replace('https://', '')}</strong>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section className="metrics-grid">
+        <article>
+          <p>Contract methods</p>
+          <strong>{methods.length}</strong>
+          <span>Frontend method matching</span>
+        </article>
+
+        <article>
+          <p>Write calls</p>
+          <strong>3</strong>
+          <span>add, lease, mark available</span>
+        </article>
+
+        <article>
+          <p>Read calls</p>
+          <strong>3</strong>
+          <span>get car, get lease, stats</span>
+        </article>
+
+        <article>
+          <p>Wallet</p>
+          <strong>{walletAddress ? 'Connected' : 'Ready'}</strong>
+          <span>Freighter signTransaction</span>
+        </article>
+      </section>
+
+      <section className="workspace-grid">
+        <article className="panel">
+          <div className="section-heading">
+            <p className="eyebrow">Write transaction</p>
+            <h2>Add car</h2>
+          </div>
+
+          <label>
+            VIN
+            <input value={vin} onChange={(event) => setVin(event.target.value)} />
+          </label>
+
+          <label>
+            Model
+            <input value={model} onChange={(event) => setModel(event.target.value)} />
+          </label>
+
+          <label>
+            Daily rate
+            <input value={dailyRate} onChange={(event) => setDailyRate(event.target.value)} />
+          </label>
+
+          <button className="primary-action" onClick={handleAddCar}>
+            Sign add_car
+          </button>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading">
+            <p className="eyebrow">Write transaction</p>
+            <h2>Lease car</h2>
+          </div>
+
+          <label>
+            Car ID
+            <input
+              type="number"
+              min="1"
+              value={carId}
+              onChange={(event) => setCarId(Number(event.target.value || 1))}
+            />
+          </label>
+
+          <label>
+            Start ledger
+            <input
+              type="number"
+              min="1"
+              value={startLedger}
+              onChange={(event) => setStartLedger(Number(event.target.value || 1))}
+            />
+          </label>
+
+          <label>
+            End ledger
+            <input
+              type="number"
+              min="1"
+              value={endLedger}
+              onChange={(event) => setEndLedger(Number(event.target.value || 1))}
+            />
+          </label>
+
+          <label>
+            Payment
+            <input value={payment} onChange={(event) => setPayment(event.target.value)} />
+          </label>
+
+          <div className="button-grid">
+            <button onClick={handleLeaseCar}>Sign lease_car</button>
+            <button onClick={handleMarkAvailable}>Sign mark_available</button>
+          </div>
+        </article>
+      </section>
+
+      <section className="workspace-grid">
+        <article className="panel">
+          <div className="section-heading">
+            <p className="eyebrow">Read contract</p>
+            <h2>Query car and lease</h2>
+          </div>
+
+          <label>
+            Lease ID
+            <input
+              type="number"
+              min="1"
+              value={leaseId}
+              onChange={(event) => setLeaseId(Number(event.target.value || 1))}
+            />
+          </label>
+
+          <div className="button-grid">
+            <button onClick={handleGetCar}>Read get_car</button>
+            <button onClick={handleGetLease}>Read get_lease</button>
+            <button onClick={handleGetStats}>Read stats</button>
+          </div>
+
+          <pre>{queryResult}</pre>
+        </article>
+
+        <article className="panel">
+          <div className="section-heading">
+            <p className="eyebrow">Transaction monitor</p>
+            <h2>Status</h2>
+          </div>
+
+          <div className="status-box">
+            <p>{statusMessage}</p>
+
+            {lastTransaction ? (
+              <a href={lastTransaction.explorerUrl} target="_blank" rel="noreferrer">
+                View transaction: {shortenAddress(lastTransaction.hash, 10, 10)}
+              </a>
+            ) : (
+              <span>No transaction submitted yet.</span>
+            )}
+          </div>
+
+          <div className="method-list">
+            {methods.map((method) => (
+              <span key={method}>{method}</span>
             ))}
           </div>
-        </div>
+        </article>
       </section>
     </main>
   );
